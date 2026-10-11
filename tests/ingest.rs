@@ -127,6 +127,58 @@ fn ingests_validations() {
     assert!(matches!(v.rules[0], ValidationRule::Presence));
 }
 
+/// ActiveRecord resolves association class names against the owner's full
+/// name, not Ruby's lexical nesting or the order files were discovered.
+#[test]
+fn association_targets_resolve_in_the_owning_model_namespace() {
+    use roundhouse::ingest::ingest_app_from_tree;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    for (options, known, expected) in [
+        ("", vec!["Item", "A::Item", "A::B::Item"], "A::B::Item"),
+        ("", vec!["Item", "A::Item"], "A::Item"),
+        ("", vec!["Item"], "Item"),
+        ("", vec!["A::B::Item", "A::B::Invoice::Item"], "A::B::Invoice::Item"),
+        (", class_name: \"Item\"", vec!["Item", "A::B::Item"], "A::B::Item"),
+        (", class_name: \"::Item\"", vec!["Item", "A::B::Item"], "Item"),
+        (", class_name: \"Catalog::Item\"", vec!["Catalog::Item", "A::B::Catalog::Item"], "A::B::Catalog::Item"),
+        (", class_name: \"::Catalog::Item\"", vec!["Catalog::Item", "A::B::Catalog::Item"], "Catalog::Item"),
+        // Rails' reflection gives a top-level namesake precedence over self.
+        (", class_name: \"Invoice\"", vec!["Invoice"], "Invoice"),
+        (", class_name: \"Invoice\"", vec![], "A::B::Invoice"),
+        // Missing classes must not be invented from the owner's namespace.
+        (", class_name: \"Missing\"", vec![], "Missing"),
+    ] {
+        for (macro_name, name) in [
+            ("has_many", "items"),
+            ("has_one", "item"),
+            ("belongs_to", "item"),
+        ] {
+            let mut tree: HashMap<PathBuf, Vec<u8>> = HashMap::new();
+            tree.insert(
+                PathBuf::from("app/models/owner.rb"),
+                format!("class A::B::Invoice < ApplicationRecord\n  {macro_name} :{name}{options}\nend\n").into_bytes(),
+            );
+            for (i, class) in known.iter().enumerate() {
+                tree.insert(
+                    PathBuf::from(format!("app/models/target_{i}.rb")),
+                    format!("class {class} < ApplicationRecord\nend\n").into_bytes(),
+                );
+            }
+            let app = ingest_app_from_tree(tree).expect("ingest association app");
+            let owner = app.models.iter().find(|m| m.name.0.as_str() == "A::B::Invoice").unwrap();
+            let target = match owner.associations().next().unwrap() {
+                Association::HasMany { target, .. }
+                | Association::HasOne { target, .. }
+                | Association::BelongsTo { target, .. }
+                | Association::HasAndBelongsToMany { target, .. } => target,
+            };
+            assert_eq!(target.0.as_str(), expected, "{macro_name} :{name}{options}; known={known:?}");
+        }
+    }
+}
+
 #[test]
 fn ingests_callbacks() {
     let app = ingest_app(fixture_path()).expect("ingest");

@@ -2664,11 +2664,16 @@ fn parse_association(
             let Some(key) = symbol_value(&assoc.key()) else { continue };
             let value = assoc.value();
             match key.as_str() {
-                // `"::Portal"` names the top-level class `Portal`; kept as written it is a class no one defines.
-                "class_name" => class_name = string_value(&value).map(|s| s.trim_start_matches("::").to_string()),
+                // Keep the root marker until app assembly can distinguish
+                // absolute lookup from an owner-relative class name.
+                "class_name" => class_name = string_value(&value),
                 "foreign_key" => {
                     foreign_key = string_value(&value).or_else(|| symbol_value(&value))
                 }
+                // HasOne has no through metadata or runtime traversal.
+                // Keep it in the unsupported-DSL ledger, not a direct
+                // association whose target now happens to resolve.
+                "through" if method == "has_one" => return None,
                 "through" => through = symbol_value(&value),
                 "source" => source = symbol_value(&value),
                 "source_type" => source_type = string_value(&value).map(|s| s.trim_start_matches("::").to_string()),

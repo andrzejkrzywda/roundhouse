@@ -633,11 +633,12 @@ pub(crate) fn collect_model_constants(model: &Model) -> Vec<(Symbol, Expr)> {
 /// dispatch failure at some call site three files away. Pushing a
 /// *spanned* diagnostic at the declaration names the actual gap.
 ///
-/// Warning, not Error: plenty of unclaimed DSL is tolerable per app
+/// Usually Warning, not Error: plenty of unclaimed DSL is tolerable per app
 /// (`include`, concerns the app never calls through typed paths), and
-/// dynamic targets often run fine without it. The skip-list below must
-/// stay in sync with the claiming passes — each entry names the pass
-/// that consumes the shape.
+/// dynamic targets often run fine without it. A refused `has_one` is an
+/// error: dropping it does not implement the requested association.
+/// The skip-list below must stay in sync with the claiming passes —
+/// each entry names the pass that consumes the shape.
 fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
     use crate::diagnostic::{Diagnostic, Severity};
     use crate::expr::LValue;
@@ -837,7 +838,12 @@ fn report_unclaimed_unknowns(model: &Model, schema: &Schema) {
             name,
             format!("model DSL call on `{}` not lowered", model.name.0.as_str()),
         );
-        d.severity = Severity::Warning;
+        // In particular, `has_one through:` has neither association
+        // metadata nor a runtime traversal. A warning would still let
+        // check succeed with no association reader in the output.
+        if name != "has_one" {
+            d.severity = Severity::Warning;
+        }
         crate::emit::diagnostics::push(d);
     }
 }

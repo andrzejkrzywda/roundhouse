@@ -1875,6 +1875,9 @@ end
     splice_concerns_into_models(&mut app);
     splice_concern_class_methods_into_includers(&mut app, &concern_class_method_spans);
     super::model_macros::expand_model_macros(&mut app, &sources)?;
+    // All models are known, and concern associations now have their real
+    // owner. Resolve once so analysis and every target read the same class.
+    resolve_association_targets(&mut app);
     // After the splice, so a class method a concern contributed gets
     // the same treatment as one written in the model.
     qualify_model_class_method_ar_calls(&mut app);
@@ -5335,6 +5338,68 @@ fn qualify_relative_includes(app: &mut App) {
             if let Some(qualified) = resolve(&owner, &path, &known) {
                 let joined = qualified.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("::");
                 *inc = crate::ident::ClassId(crate::ident::Symbol::from(joined));
+            }
+        }
+    }
+}
+
+/// ActiveRecord's `compute_type` searches the full owner's name, then
+/// each enclosing namespace, then the top level. This is not lexical
+/// constant lookup: `class Invoices::Invoice` also finds
+/// `Invoices::InvoiceItem`. Only ingested models can win; an unresolved
+/// target keeps its spelling so the existing diagnostics remain honest.
+fn resolve_association_targets(app: &mut App) {
+    use crate::dialect::{Association, ModelBodyItem};
+    use crate::ident::ClassId;
+
+    let modeled: HashSet<ClassId> = app.models.iter().map(|m| m.name.clone()).collect();
+    // A nearer unmodeled declaration must not be skipped for a distant
+    // model. In particular, an STI library class is not a synthesized
+    // association target: typing it can hide a missing runtime operation.
+    let known: HashSet<ClassId> = modeled.iter().cloned()
+        .chain(app.library_classes.iter().map(|c| c.name.clone()))
+        .chain(app.controllers.iter().map(|c| c.name.clone()))
+        .collect();
+    for model in &mut app.models {
+        let owner = model.name.0.as_str();
+        for item in &mut model.body {
+            let ModelBodyItem::Association { assoc, .. } = item else { continue };
+            let skip_lookup = matches!(assoc,
+                Association::HasMany { through: Some(_), .. }
+                | Association::BelongsTo { polymorphic: true, .. }
+                | Association::HasAndBelongsToMany { .. });
+            let target = match assoc {
+                Association::HasMany { target, .. }
+                | Association::HasOne { target, .. }
+                | Association::BelongsTo { target, .. }
+                | Association::HasAndBelongsToMany { target, .. } => target,
+            };
+            let raw = target.0.as_str();
+            if raw.starts_with("::") {
+                *target = ClassId(Symbol::from(raw.trim_start_matches("::")));
+                continue;
+            }
+            // Through targets depend on a source reflection, and a
+            // polymorphic belongs_to has no single statically known class.
+            // HABTM has no synthesized runtime reader yet. Leave these
+            // paths unchanged rather than making an unsupported call type.
+            if skip_lookup {
+                continue;
+            }
+            // Reflection#_klass tries a top-level namesake before self.
+            if crate::naming::demodulize(owner) == raw && known.contains(target) {
+                continue;
+            }
+            let mut scope = Some(owner);
+            while let Some(prefix) = scope {
+                let candidate = ClassId(Symbol::from(format!("{prefix}::{raw}")));
+                if known.contains(&candidate) {
+                    if modeled.contains(&candidate) {
+                        *target = candidate;
+                    }
+                    break;
+                }
+                scope = prefix.rsplit_once("::").map(|(parent, _)| parent);
             }
         }
     }
